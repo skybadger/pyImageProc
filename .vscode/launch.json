@@ -1,0 +1,111 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+
+        {
+            "name": "Python Debugger: Current File with Arguments",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "args": "${command:pickArgs}"
+        },
+        {
+            "name": "Debug pyimageproc.py with Arguments",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/pyimageproc.py",
+            "console": "integratedTerminal",
+            "args": [
+                "${input:rootDir}",
+                "--output",
+                "${input:outputDir}",
+                "--temp-tol",
+                "${input:tempTol}",
+                "--stack-method",
+                "${input:stackMethod}",
+                "--bias-dir",
+                "${input:biasDir}",
+                "--dark-dir",
+                "${input:darkDir}",
+                "--flat-dir",
+                "${input:flatDir}",
+                "--flatdark-dir",
+                "${input:flatdarkDir}"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Debug pyimageproc.py (Scan Only)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/pyimageproc.py",
+            "console": "integratedTerminal",
+            "args": [
+                "${input:rootDir}",
+                "--output",
+                "${input:outputDir}",
+                "--scan-only"
+            ],
+            "cwd": "${workspaceFolder}"
+        }
+    ],
+    "inputs": [
+        {
+            "id": "rootDir",
+            "description": "Root directory containing FITS files",
+            "default": "./test_data",
+            "type": "promptString"
+        },
+        {
+            "id": "outputDir",
+            "description": "Output directory for processed files",
+            "default": "./output",
+            "type": "promptString"
+        },
+        {
+            "id": "tempTol",
+            "description": "Temperature tolerance in C (default: 3.0)",
+            "default": "3.0",
+            "type": "promptString"
+        },
+        {
+            "id": "stackMethod",
+            "description": "Stacking method: sigma_clip_mean, median, or mean",
+            "default": "sigma_clip_mean",
+            "type": "pickString",
+            "options": [
+                "sigma_clip_mean",
+                "median",
+                "mean"
+            ]
+        },
+        {
+            "id": "biasDir",
+            "description": "Directory containing bias frames (leave empty to use root)",
+            "default": "./calibration/biases",
+            "type": "promptString"
+        },
+        {
+            "id": "darkDir",
+            "description": "Directory containing dark frames (leave empty to use root)",
+            "default": "./calibration/darks",
+            "type": "promptString"
+        },
+        {
+            "id": "flatDir",
+            "description": "Directory containing flat frames (leave empty to use root)",
+            "default": "./calibration/flats",
+            "type": "promptString"
+        },
+        {
+            "id": "flatdarkDir",
+            "description": "Directory containing flat-dark frames (leave empty to use root)",
+            "default": "./calibration/flatdarks",
+            "type": "promptString"
+        }
+    ]
+}

@@ -10,7 +10,7 @@ A practical FITS reduction pipeline for:
 
 Features
 --------
-1. Scans a directory tree of FITS files.
+1. Scans directory tree(s) of FITS files - light frames from root directory, calibration frames from separate directories if specified.
 2. Classifies files using FITS headers and/or filename parsing.
 3. Groups light frames by subject/date/filter/binning/temperature.
 4. Writes a per-project descriptor JSON file.
@@ -39,8 +39,12 @@ Notes
 
 Example
 -------
-python astro_reduce.py /data/astro \
+python astro_reduce.py /data/lights \
     --output /data/reduced \
+    --bias-dir /data/calibration/biases \
+    --dark-dir /data/calibration/darks \
+    --flat-dir /data/calibration/flats \
+    --flatdark-dir /data/calibration/flatdarks \
     --temp-tol 3.0 \
     --stack-method sigma_clip_mean
 
@@ -95,6 +99,7 @@ class FrameInfo:
     temperature_c: Optional[float]
     exposure_s: Optional[float]
     date_obs: Optional[str]
+    camera_id: Optional[str] = None  # camera identifier from CAMERAID, INSTRUMENT, or INSTRUME
     topic: Optional[str] = None
     date_folder: Optional[str] = None
     image_type_folder: Optional[str] = None
@@ -153,6 +158,7 @@ FILTER_ALIASES = {
     "s2": "SII",
     "sii": "SII",
     "clear": "Clear",
+    "OSC": "OSC",
 }
 
 
@@ -339,6 +345,10 @@ def read_frame_info(path: Path) -> Optional[FrameInfo]:
                 except Exception:
                     date_obs = str(date_obs)
 
+        camera_id = get_header_value(hdr, ["CAMERAID", "INSTRUMENT", "INSTRUME"], None)
+        if camera_id:
+            camera_id = str(camera_id).strip()
+
         parts = path.parts
         topic = parts[-4] if len(parts) >= 4 else None
         date_folder = parts[-3] if len(parts) >= 3 else None
@@ -354,6 +364,7 @@ def read_frame_info(path: Path) -> Optional[FrameInfo]:
             temperature_c=temp,
             exposure_s=exptime,
             date_obs=date_obs,
+            camera_id=camera_id,
             topic=topic,
             date_folder=date_folder,
             image_type_folder=image_type_folder,
@@ -436,6 +447,49 @@ def minmax_date(frames: List[FrameInfo]) -> Tuple[Optional[str], Optional[str]]:
     if not vals:
         return None, None
     return min(vals), max(vals)
+
+
+def check_camera_id_consistency(
+    lights: List[FrameInfo],
+    calibration_frames: List[FrameInfo],
+    calibration_type: str
+) -> Tuple[List[FrameInfo], List[str]]:
+    """
+    Filter calibration frames by camera ID consistency with light frames.
+    
+    Returns:
+        Tuple of (filtered_frames, warning_notes)
+    """
+    notes = []
+    
+    # Get camera IDs from light frames
+    light_camera_ids = {f.camera_id for f in lights if f.camera_id}
+    
+    if not light_camera_ids:
+        # No camera ID in light frames, don't filter
+        return calibration_frames, notes
+    
+    # Check calibration frames for camera ID consistency
+    matching = [f for f in calibration_frames if f.camera_id in light_camera_ids]
+    mismatched = [f for f in calibration_frames if f.camera_id and f.camera_id not in light_camera_ids]
+    no_camera_id = [f for f in calibration_frames if not f.camera_id]
+    
+    if mismatched:
+        mismatched_ids = set(f.camera_id for f in mismatched)
+        notes.append(
+            f"Warning: {len(mismatched)} {calibration_type} frame(s) have camera ID mismatch "
+            f"(light frames: {light_camera_ids}, mismatched: {mismatched_ids}). "
+            f"These frames will be filtered out."
+        )
+    
+    if no_camera_id:
+        notes.append(
+            f"Info: {len(no_camera_id)} {calibration_type} frame(s) have no camera ID specified. "
+            f"These will be included since camera consistency cannot be verified."
+        )
+    
+    # Return matching frames plus those without camera ID info
+    return sorted(matching + no_camera_id, key=lambda f: f.path), notes
 
 
 def select_candidate_biases(
@@ -586,10 +640,19 @@ def build_project_descriptors(
         cflat = select_candidate_flats(project_lights, flats, temp_tol)
         cflatdark = select_candidate_flatdarks(cflat, flatdarks, temp_tol)
 
+        # Check camera ID consistency with light frames
+        cbias, bias_notes = check_camera_id_consistency(project_lights, cbias, "bias")
+        cdark, dark_notes = check_camera_id_consistency(project_lights, cdark, "dark")
+        cflat, flat_notes = check_camera_id_consistency(project_lights, cflat, "flat")
+        cflatdark, flatdark_notes = check_camera_id_consistency(project_lights, cflatdark, "flat-dark")
+
         desc.candidate_bias_files = [f.path for f in cbias]
         desc.candidate_dark_files = [f.path for f in cdark]
         desc.candidate_flat_files = [f.path for f in cflat]
         desc.candidate_flatdark_files = [f.path for f in cflatdark]
+
+        # Add camera ID consistency notes
+        desc.notes.extend(bias_notes + dark_notes + flat_notes + flatdark_notes)
 
         if not cbias:
             desc.notes.append("No candidate bias frames found.")
@@ -1034,7 +1097,7 @@ def process_all_projects(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Astronomical FITS calibration and stacking pipeline.")
-    parser.add_argument("root", type=str, help="Root directory containing FITS files.")
+    parser.add_argument("root", type=str, help="Root directory containing light FITS files.")
     parser.add_argument("--output", type=str, required=True, help="Output directory.")
     parser.add_argument("--temp-tol", type=float, default=3.0, help="Temperature tolerance in C for calibration matching.")
     parser.add_argument(
@@ -1048,18 +1111,93 @@ def main() -> None:
         action="store_true",
         help="Only scan tree and write project descriptors; do not process."
     )
+
+    # Separate calibration directories
+    parser.add_argument(
+        "--bias-dir",
+        type=str,
+        help="Directory containing bias frames (if different from root)."
+    )
+    parser.add_argument(
+        "--dark-dir",
+        type=str,
+        help="Directory containing dark frames (if different from root)."
+    )
+    parser.add_argument(
+        "--flat-dir",
+        type=str,
+        help="Directory containing flat frames (if different from root)."
+    )
+    parser.add_argument(
+        "--flatdark-dir",
+        type=str,
+        help="Directory containing flat-dark frames (if different from root)."
+    )
+
     args = parser.parse_args()
 
     root = Path(args.root).expanduser().resolve()
     output_dir = Path(args.output).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"[INFO] Scanning FITS tree: {root}")
-    frames = scan_fits_tree(root)
-    print(f"[INFO] Found {len(frames)} FITS files.")
+    # Scan light frames from root directory
+    print(f"[INFO] Scanning light frames from: {root}")
+    light_frames = scan_fits_tree(root)
+    light_frames = [f for f in light_frames if f.frame_type == "light"]
+
+    # Scan calibration frames from specified directories or root
+    calibration_frames = []
+
+    # Bias frames
+    bias_dir = Path(args.bias_dir).expanduser().resolve() if args.bias_dir and args.bias_dir.strip() else root
+    if bias_dir.exists():
+        print(f"[INFO] Scanning bias frames from: {bias_dir}")
+        bias_frames = scan_fits_tree(bias_dir)
+        bias_frames = [f for f in bias_frames if f.frame_type == "bias"]
+        calibration_frames.extend(bias_frames)
+        print(f"[INFO] Found {len(bias_frames)} bias frames")
+    else:
+        print(f"[WARN] Bias directory does not exist: {bias_dir}")
+
+    # Dark frames
+    dark_dir = Path(args.dark_dir).expanduser().resolve() if args.dark_dir and args.dark_dir.strip() else root
+    if dark_dir.exists():
+        print(f"[INFO] Scanning dark frames from: {dark_dir}")
+        dark_frames = scan_fits_tree(dark_dir)
+        dark_frames = [f for f in dark_frames if f.frame_type == "dark"]
+        calibration_frames.extend(dark_frames)
+        print(f"[INFO] Found {len(dark_frames)} dark frames")
+    else:
+        print(f"[WARN] Dark directory does not exist: {dark_dir}")
+
+    # Flat frames
+    flat_dir = Path(args.flat_dir).expanduser().resolve() if args.flat_dir and args.flat_dir.strip() else root
+    if flat_dir.exists():
+        print(f"[INFO] Scanning flat frames from: {flat_dir}")
+        flat_frames = scan_fits_tree(flat_dir)
+        flat_frames = [f for f in flat_frames if f.frame_type == "flat"]
+        calibration_frames.extend(flat_frames)
+        print(f"[INFO] Found {len(flat_frames)} flat frames")
+    else:
+        print(f"[WARN] Flat directory does not exist: {flat_dir}")
+
+    # Flat-dark frames
+    flatdark_dir = Path(args.flatdark_dir).expanduser().resolve() if args.flatdark_dir and args.flatdark_dir.strip() else root
+    if flatdark_dir.exists():
+        print(f"[INFO] Scanning flat-dark frames from: {flatdark_dir}")
+        flatdark_frames = scan_fits_tree(flatdark_dir)
+        flatdark_frames = [f for f in flatdark_frames if f.frame_type == "flatdark"]
+        calibration_frames.extend(flatdark_frames)
+        print(f"[INFO] Found {len(flatdark_frames)} flat-dark frames")
+    else:
+        print(f"[WARN] Flat-dark directory does not exist: {flatdark_dir}")
+
+    # Combine all frames
+    all_frames = light_frames + calibration_frames
+    print(f"[INFO] Total frames found: {len(all_frames)} ({len(light_frames)} lights, {len(calibration_frames)} calibration)")
 
     descriptors = build_project_descriptors(
-        frames=frames,
+        frames=all_frames,
         output_dir=output_dir,
         temp_tol=args.temp_tol,
     )
